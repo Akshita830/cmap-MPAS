@@ -121,6 +121,7 @@ module surface_diagnostics
         real (kind=RKIND), dimension(:), pointer :: snow_bucket
         real (kind=RKIND), dimension(:), pointer :: zrain_bucket
         real (kind=RKIND), dimension(:), pointer :: snow_total
+        real (kind=RKIND), dimension(:), pointer :: zrain_total
         real (kind=RKIND), dimension(:), pointer :: refl10cm_prate
         real (kind=RKIND), dimension(:), pointer :: ncuprec
 
@@ -132,7 +133,7 @@ module surface_diagnostics
         real (kind=RKIND), dimension(:), pointer :: dewpoint_2m
 
         ! Surface diagnostics (local)
-        real (kind=RKIND) :: evp, prate
+        real (kind=RKIND) :: evp, prate, zrain
 
         ! Diagnostics (shared in)
         real (kind=RKIND), dimension(:), pointer :: t2m
@@ -147,6 +148,7 @@ module surface_diagnostics
         call mpas_pool_get_array(diag, 'conv_bucket', conv_bucket)
         call mpas_pool_get_array(diag, 'snow_bucket', snow_bucket)
         call mpas_pool_get_array(diag, 'zrain_bucket', zrain_bucket)
+        call mpas_pool_get_array(diag, 'zrain_total', zrain_total)
         call mpas_pool_get_array(diag, 'snow_total', snow_total)
         call mpas_pool_get_array(diag, 'snow_ratio', snow_ratio)
         call mpas_pool_get_array(diag, 'surface_pressure', psfc)
@@ -162,7 +164,9 @@ module surface_diagnostics
             conv_bucket(iCell) = conv_bucket(iCell) + raincv(iCell)
             snow_bucket(iCell) = snow_bucket(iCell) + snowncv(iCell) + graupelncv(iCell)
             if (t2m(iCell) < 273.16) then
-                zrain_bucket(iCell) = zrain_bucket(iCell) + max(0., rainncv(iCell) + raincv(iCell) - snowncv(iCell) - graupelncv(iCell))
+                zrain = max(0., rainncv(iCell) + raincv(iCell) - snowncv(iCell) - graupelncv(iCell))
+                zrain_bucket(iCell) = zrain_bucket(iCell) + zrain
+                zrain_total(iCell) = zrain_total(iCell) + zrain * 0.001
             end if
             snow_total(iCell) = snow_total(iCell) + (snowncv(iCell) + graupelncv(iCell)) * snow_ratio(iCell) * 0.001
 
