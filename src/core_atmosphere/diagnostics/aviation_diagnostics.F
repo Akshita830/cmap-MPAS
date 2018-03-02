@@ -31,6 +31,11 @@ module aviation_diagnostics
 
     logical :: is_needed_avcnvmsk
 
+    ! Smoothing
+    integer :: smooth_radius ! Radius for HIWC smoothing, 0 = no smoothing
+    integer, dimension(:,:), allocatable :: neighborhood
+    integer, dimension(:), allocatable :: nNeighbors
+
     contains
 
 
@@ -46,10 +51,12 @@ module aviation_diagnostics
     !-----------------------------------------------------------------------
     subroutine aviation_diagnostics_setup(all_pools)
         use mpas_derived_types, only : MPAS_pool_type, MPAS_clock_type, MPAS_STREAM_OUTPUT
-        use mpas_pool_routines, only : mpas_pool_get_subpool
+        use mpas_pool_routines, only : mpas_pool_get_subpool, mpas_pool_get_array
         use mpas_atm_diagnostics_utils, only : mpas_stream_inclusion_count
 
         implicit none
+
+        real (kind=RKIND), dimension(:), pointer :: invAreaCell 
 
         type (MPAS_pool_type), pointer :: all_pools
 
@@ -61,7 +68,90 @@ module aviation_diagnostics
 
         is_needed_avcnvmsk = (mpas_stream_inclusion_count('avcnvmsk', direction=MPAS_STREAM_OUTPUT) > 0)
 
+        ! Initialize smoother if necessary
+        if (mpas_stream_inclusion_count('hiwc', direction=MPAS_STREAM_OUTPUT) > 0) then
+            call mpas_pool_get_array(mesh, 'invAreaCell', invAreaCell)
+            smooth_radius = NINT(SQRT(invAreaCell(1) * 9.161e9)) ! area with radius of 3x18km
+            if (smooth_radius > 0) then
+                call initialize_hiwc_smoother()
+            end if
+        end if
+
     end subroutine aviation_diagnostics_setup
+
+
+    subroutine initialize_hiwc_smoother
+        use mpas_pool_routines, only : mpas_pool_get_dimension, mpas_pool_get_array
+
+        implicit none
+
+        integer, allocatable, dimension(:) :: tmpNeighbors
+
+        integer, pointer :: nCells, maxEdges
+        integer, dimension(:,:), pointer :: cellsOnCell
+        integer, dimension(:), pointer :: nEdgesOnCell
+        integer :: iRadius, maxNeighborhood, iCell, nn
+
+        call mpas_pool_get_dimension(mesh, 'nCells', nCells)
+        call mpas_pool_get_dimension(mesh, 'maxEdges', maxEdges)
+        call mpas_pool_get_array(mesh, 'cellsOnCell', cellsOnCell)
+        call mpas_pool_get_array(mesh, 'nEdgesOnCell', nEdgesOnCell)
+
+        ! Calculate upper bound for neighborhood size
+        maxNeighborhood = 1
+        do iRadius=1,smooth_radius
+            maxNeighborhood = maxNeighborhood + iRadius * maxEdges
+        end do
+
+        ! Allocate smoother mapping
+        allocate(tmpNeighbors(maxNeighborhood))
+        allocate(neighborhood(maxNeighborhood, nCells))
+        allocate(nNeighbors(nCells))
+
+        ! Define the neighborhood for each cell
+        do iCell=1,nCells
+            nn = 1
+            call find_neighbors(iCell, cellsOnCell, nEdgesOnCell, smooth_radius, tmpNeighbors, nn)
+            nNeighbors(iCell) = nn
+            neighborhood(1:nn,iCell) = tmpNeighbors(1:nn)
+        end do
+
+        deallocate(tmpNeighbors)
+
+    end subroutine initialize_hiwc_smoother
+
+    ! Finds all neighbors within radius from iCenter
+    subroutine find_neighbors(iCenter, cellsOnCell, nEdgesOnCell, radius, neighborhood, nNeighbors)
+
+        integer, intent(in) :: iCenter, radius
+        integer, dimension(:,:), intent(in) :: cellsOnCell
+        integer, dimension(:), intent(in) :: nEdgesOnCell
+        integer, dimension(:), intent(out) :: neighborhood
+        integer, intent(out) :: nNeighbors
+        integer :: itr_start, itr_end, iRadius, itr_cell, iNeighbor, cell, iCur
+        logical :: found
+
+        nNeighbors = 1
+        itr_start = 1
+        itr_end = 1
+
+        neighborhood(1) = iCenter
+        do iRadius=1,radius
+            do itr_cell=itr_start,itr_end
+                ! Check each neighbor in cellsOnCell
+                do iNeighbor=1,nEdgesOnCell(neighborhood(itr_cell))
+                    cell = cellsOnCell(iNeighbor,neighborhood(itr_cell))
+                    if (.not.ANY(neighborhood(1:nNeighbors) == cell)) then
+                        nNeighbors = nNeighbors + 1
+                        neighborhood(nNeighbors) = cell
+                    end if
+                end do
+            end do
+            itr_start = itr_end + 1
+            itr_end = nNeighbors
+        end do
+
+    end subroutine
 
 
     !-----------------------------------------------------------------------
@@ -104,6 +194,7 @@ module aviation_diagnostics
         real (kind=RKIND), dimension(:), allocatable :: qi_200hPa
         real (kind=RKIND), dimension(:), allocatable :: qi_250hPa
         real (kind=RKIND), dimension(:), allocatable :: virtualT_400hPa
+        real (kind=RKIND), dimension(:), allocatable :: hiwc_calc
 
         real(kind=RKIND) :: w200, w250
 
@@ -121,13 +212,12 @@ module aviation_diagnostics
             allocate(virtualT_400hPa(nCells))    
             allocate(qi_200hPa(nCells))
             allocate(qi_250hPa(nCells))
+            allocate(hiwc_calc(nCells))
 
             ! Get cloud ice mixing ratio at 200hPa and 250hPa 
             ! and virtual Temperature at 400 hPa
-            call interp_diagnostics(mesh, state, 1, diag, qi_200hPa, qi_250hPa, virtualT_400hPa)
+            call interp_diagnostics(qi_200hPa, qi_250hPa, virtualT_400hPa)
 
-            ! Target array
-            call mpas_pool_get_array(diag, 'hiwc', hiwc)
 
             do iCell=1,nCells
                 w200 = MIN(1.0, MAX(0.0, &
@@ -135,9 +225,9 @@ module aviation_diagnostics
                            (warm_boundary_temp - cold_boundary_temp) ) )
 
                 w250 = 1.0 - w200
-                hiwc(iCell) = NINT(MAX(0.0, MIN(3.0, &
-                                  ( (w250 * qi_250hPa(iCell) * 1.0E6 + &
-                                     w200 * qi_200hPa(iCell) * 1.0E6) - 25. ) / 80. ) ) )
+                hiwc_calc(iCell) = MAX(0.0, MIN(3.0, &
+                                    ( (w250 * qi_250hPa(iCell) * 1.0E6 +  &
+                                       w200 * qi_200hPa(iCell) * 1.0E6) - 25. ) / 80. ))
 
             end do
 
@@ -145,9 +235,40 @@ module aviation_diagnostics
             if(allocated(qi_250hPa)) deallocate(qi_250hPa)
             if(allocated(virtualT_400hPa)) deallocate(virtualT_400hPa)
 
+            if (smooth_radius > 0) then
+                call smooth(hiwc_calc, nCells)
+            end if
+
+            ! Round to the nearest integer for output array
+            call mpas_pool_get_array(diag, 'hiwc', hiwc)
+            hiwc(:) = NINT(hiwc_calc(:))
+
+            deallocate(hiwc_calc)
+
         end if
 
     end subroutine aviation_diagnostics_compute
+
+    ! Simple mean smoothing within smooth_radius
+    subroutine smooth(arr, nCells)
+        implicit none
+
+        real (kind=RKIND), dimension(:), intent(inout) :: arr
+        integer, intent(in) :: nCells
+        real (kind=RKIND), allocatable, dimension(:) :: smoothed
+
+        integer :: iCell, iNeighbor
+
+        allocate(smoothed(nCells))
+        do iCell=1,nCells
+            smoothed(iCell) = 0.0
+            do iNeighbor=1,nNeighbors(iCell)
+                smoothed(iCell) = smoothed(iCell) + arr(neighborhood(iNeighbor, iCell))
+            end do
+            arr(iCell) = smoothed(iCell)/nNeighbors(iCell)
+        end do
+        deallocate(smoothed)
+    end subroutine
 
     !-----------------------------------------------------------------------
     !  routine update_avcnvmsk
@@ -196,14 +317,14 @@ module aviation_diagnostics
 
         do iCell=1,nCells
             ! Find the max reflectivity and max updraft
-            dbzmax = MAXVAL(refl10cm(iCell,:))
-            wmax = MAXVAL(w(iCell,:))
+            dbzmax = MAXVAL(refl10cm(:,iCell))
+            wmax = MAXVAL(w(:,iCell))
 
             ! Find the convective top either as echo top or parameterized convective top
             k_echotop = 1
             if (dbzmax > dbzcrit_min) then
                 do k=1,nVertLevels-1
-                    if (refl10cm(iCell,k) > dbzcrit_min) then
+                    if (refl10cm(k,iCell) > dbzcrit_min) then
                         k_echotop = k
                     end if
                 end do
@@ -215,10 +336,10 @@ module aviation_diagnostics
                 echotop = 0.
             else
                 ! Linearly interpolate to find the echotop height between two levels
-                wgt = (refl10cm(iCell,k_echotop)-dbzcrit_min) / &
-                      (refl10cm(iCell,k_echotop)-refl10cm(iCell,k_echotop+1))
+                wgt = (refl10cm(k_echotop,iCell) - dbzcrit_min) / &
+                      (refl10cm(k_echotop,iCell) - refl10cm(k_echotop+1,iCell))
                 wgt = MAX(0., MIN(1., wgt))
-                echotop = wgt * z(iCell,k_echotop+1) + (1.-wgt) * z(iCell,k_echotop) ! MSL
+                echotop = wgt * z(k_echotop+1,iCell) + (1.-wgt) * z(k_echotop,iCell) ! MSL
                 echotop = echotop - z0(iCell) ! AGL
             end if
 
@@ -235,265 +356,102 @@ module aviation_diagnostics
     end subroutine
 
    !==================================================================================================
-    subroutine interp_diagnostics(mesh, state, time_lev, diag, qi_200hPa, qi_250hPa, virtualT_400hPa)
+    subroutine interp_diagnostics(qi_200hPa, qi_250hPa, virtualT_400hPa)
    !==================================================================================================
 
-       !input arguments:
-        type (mpas_pool_type), intent(in)  :: mesh
-        type (mpas_pool_type), intent(in) :: state
-        integer, intent(in) :: time_lev              ! which time level to use from state
-       
-       !inout arguments:
-        type (mpas_pool_type), intent(inout) :: diag
-       
-       !output arguments:
+        ! output arguments:
         real (kind=RKIND), dimension(:), intent(out) :: qi_200hPa
         real (kind=RKIND), dimension(:), intent(out) :: qi_250hPa
         real (kind=RKIND), dimension(:), intent(out) :: virtualT_400hPa
 
-       !local variables:
-        integer :: iCell,iVert,iVertD,k,kk
-        integer, pointer :: nCells, nCellsSolve, nVertLevels, nVertices, vertexDegree
-        integer :: nVertLevelsP1
-        integer, pointer :: index_qv, index_qi, num_scalars
-       
-        real (kind=RKIND), dimension(:,:), pointer :: exner
-        real (kind=RKIND), dimension(:,:), pointer :: theta_m
+        ! local variables:
+        integer :: iCell
+        integer, pointer :: nCells, nVertLevels
+        integer, pointer :: index_qv, index_qi
 
-        real (kind=RKIND), dimension(:,:), pointer :: pressure_b, pressure_p 
+        ! prognostics
+        real (kind=RKIND), dimension(:,:), pointer :: exner, theta_m, pressure_b, pressure_p
         real (kind=RKIND), dimension(:,:,:), pointer :: scalars
-       
-        real (kind=RKIND), dimension(:), allocatable :: temperature_400hPa
-        real (kind=RKIND), dimension(:), allocatable :: qv_400hPa
 
+        ! diagnostics
+        real (kind=RKIND), dimension(:), allocatable :: t_400hPa, qv_400hPa
         real (kind=RKIND), dimension(:,:), allocatable :: pressure, temperature
-       !local interpolated fields:
-        integer :: nIntP
-        real (kind=RKIND), dimension(:,:), allocatable :: press_in,qi_in,qv_in,temp_in
-        real (kind=RKIND), dimension(:,:), allocatable :: field_interp,press_interp
 
         call mpas_pool_get_dimension(mesh, 'nCells', nCells)
         call mpas_pool_get_dimension(mesh, 'nVertLevels', nVertLevels)
-        call mpas_pool_get_dimension(mesh, 'nVertices', nVertices)
         call mpas_pool_get_dimension(state, 'index_qv', index_qv)
         call mpas_pool_get_dimension(state, 'index_qi', index_qi)
-        call mpas_pool_get_dimension(state, 'num_scalars', num_scalars)
-       
-        nVertLevelsP1 = nVertLevels + 1
 
-        call mpas_pool_get_array(state, 'theta_m', theta_m, time_lev)
-        call mpas_pool_get_array(state, 'scalars', scalars, time_lev)
+        call mpas_pool_get_array(state, 'theta_m', theta_m, 1)
+        call mpas_pool_get_array(state, 'scalars', scalars, 1)
        
         call mpas_pool_get_array(diag, 'exner', exner)
         call mpas_pool_get_array(diag, 'pressure_base', pressure_b)
         call mpas_pool_get_array(diag, 'pressure_p', pressure_p)
 
-        if(.not.allocated(pressure)    ) allocate(pressure(nVertLevels,nCells)      )
-        if(.not.allocated(temperature) ) allocate(temperature(nVertLevels,nCells)   )
+        allocate(pressure(nVertLevels,nCells)      )
+        allocate(temperature(nVertLevels,nCells)   )
        
-       !calculation of total pressure at cell centers (at mass points):
-        do iCell = 1, nCells
-        do k = 1, nVertLevels
-           pressure(k,iCell)    = (pressure_p(k,iCell) + pressure_b(k,iCell)) / 100._RKIND
-        enddo
-        enddo
+        ! Calculation of total pressure at cell centers (at mass points):
+        pressure(:,:) = (pressure_p(:,:) + pressure_b(:,:)) / 100._RKIND
               
-       !calculation of temperature at cell centers:
-        do iCell = 1,nCells
-        do k = 1,nVertLevels
-            temperature(k,iCell) = (theta_m(k,iCell)/(1._RKIND+rvord*scalars(index_qv,k,iCell)))*exner(k,iCell) 
-        enddo
-        enddo
-       
-       !interpolation to fixed pressure levels for fields located at cells centers and at mass points:
-        nIntP = 2
-        if(.not.allocated(field_interp)) allocate(field_interp(nCells,nIntP) )
-        if(.not.allocated(press_interp)) allocate(press_interp(nCells,nIntP) )
-        do iCell = 1, nCells
-           press_interp(iCell,1) = 200.0_RKIND
-           press_interp(iCell,2) = 250.0_RKIND
-        enddo
-       
-        if(.not.allocated(press_in)) allocate(press_in(nCells,nVertLevels))
-        if(.not.allocated(temp_in)) allocate(temp_in(nCells,nVertLevels))
-        if(.not.allocated(qi_in)) allocate(qi_in(nCells,nVertLevels))
-        if(.not.allocated(qv_in)) allocate(qv_in(nCells,nVertLevels))
+        ! Calculation of temperature at cell centers:
+        temperature(:,:) = theta_m(:,:)/(1._RKIND+rvord*scalars(index_qv,:,:)) * exner(:,:)
 
-        do iCell = 1, nCells
-        do k = 1, nVertLevels
-           kk = nVertLevels+1-k
-           press_in(iCell,kk) = pressure(k,iCell)
-           temp_in(iCell,kk) = temperature(k,iCell)
-           ! Cloud Ice and Water Vapor Mixing Ratios
-           qi_in(iCell,kk) = scalars(index_qi,kk,iCell)
-           qv_in(iCell,kk) = scalars(index_qv,kk,iCell)
-        enddo
-        enddo
-
-        call interp_tofixed_pressure(nCells,nVertLevels,nIntP,press_in,qi_in,press_interp,field_interp)
-        do iCell = 1, nCells
-            qi_200hPa(iCell) = field_interp(iCell,1)
-            qi_250hPa(iCell) = field_interp(iCell,2)
-        enddo
-      
-        if(allocated(temperature) ) deallocate(temperature )
-        if(allocated(pressure)    ) deallocate(pressure    ) 
-        if(allocated(qi_in)       ) deallocate(qi_in)       
-        if(allocated(field_interp)) deallocate(field_interp)
-        if(allocated(press_interp)) deallocate(press_interp)
-       
-        ! temperature and qv at 400hPa
-        allocate(field_interp(nCells, 1))
-        allocate(press_interp(nCells, 1))
-
-        ! We only interpolate T and qv to 400mb
-        press_interp(:,1) = 400.0_RKIND
         allocate(qv_400hPa(nCells))
-        allocate(temperature_400hPa(nCells))
-        call interp_tofixed_pressure(nCells,nVertLevels,1,press_in,qv_in,press_interp,field_interp)
-        do iCell=1, nCells
-            qv_400hPa(iCell) = field_interp(iCell,1)
-        enddo
-        call interp_tofixed_pressure(nCells,nVertLevels,1,press_in,temp_in,press_interp,field_interp)
-        do iCell=1, nCells
-            temperature_400hPa(iCell) = field_interp(iCell,1)
+        allocate(t_400hPa(nCells))
+       
+        ! Interpolation to fixed pressure levels for fields located at cells centers and at mass points:
+        do iCell = 1, nCells
+            qi_200hPa(iCell) = interp_to_p(nVertLevels, scalars(index_qi,:,iCell), pressure(:,iCell), 200._RKIND)
+            qi_250hPa(iCell) = interp_to_p(nVertLevels, scalars(index_qi,:,iCell), pressure(:,iCell), 250._RKIND)
+            qv_400hPa(iCell) = interp_to_p(nVertLevels, scalars(index_qv,:,iCell), pressure(:,iCell), 400._RKIND)
+            t_400hPa(iCell)  = interp_to_p(nVertLevels, temperature(:,iCell),      pressure(:,iCell), 400._RKIND)
         enddo
 
         ! Calculate virtual temperature at 400mb     
-        !call compute_virtual_temperature(temperature_400hPa, qv_400hPa, virtualT_400hPa)
-        do iCell = 1, nCells
-            virtualT_400hPa(iCell) = temperature_400hPa(iCell) * (1.0 + qv_400hPa(iCell) * inveps) / (1.0 + qv_400hPa(iCell))
-        enddo
- 
+        virtualT_400hPa(:) = t_400hPa(:) * (1.0 + qv_400hPa(:) * rvord) / (1.0 + qv_400hPa(:))
+
+        deallocate(pressure)
+        deallocate(temperature)
         deallocate(qv_400hPa)
-        deallocate(temperature_400hPa)
-        deallocate(qv_in)
-        deallocate(press_in)
-        deallocate(temp_in)
-        deallocate(press_interp)
-        deallocate(field_interp)
+        deallocate(t_400hPa)
 
     end subroutine interp_diagnostics
 
+    pure function interp_to_p(nlev, field_in, p_in, p_out)
+        ! input arguments
+        integer, intent(in) :: nlev
+        real(kind=RKIND), intent(in), dimension(nlev) :: field_in, p_in
+        real(kind=RKIND), intent(in) :: p_out
 
-   !***********************************************************************
-   !
-   !  subroutine compute_virtual_temperature
-   !
-   !> \brief   Computes virtual Temperature given T and mixing ratio
-   !> \author  Cathryn Meyer
-   !> \date    Dec 2017
-   !> \details
-   !>  Given 1d temperature and mixing ratio fields, this routine
-   !>  will compute the virtual temperature
-   !
-   !----------------------------------------------------------------------- 
-    subroutine compute_virtual_temperature(t, mr, vt)
-   
-       implicit none
-   
-       real(kind=RKIND), dimension(:), intent(out) :: vt
-       real(kind=RKIND), dimension(:), intent(in) :: t
-       real(kind=RKIND), dimension(:), intent(in) :: mr
-   
-       integer :: nCells
-       integer :: iCell, k
-       real :: Rd = 287.
-       real :: Rv = 461.5
-       real :: eps, inveps
-       eps = Rd / Rv    !0.622 dimensionless
-       inveps = 1. / eps
+        ! output arguments
+        real(kind=RKIND) :: interp_to_p
 
-       !
-       ! Get dimensions of input arrays
-       !
-       nCells = size(t, 1) 
-       !if(.not.allocated(vt)) allocate(vt(nCells)) 
+        ! Local
+        integer :: z
+        real(kind=RKIND) :: dpu, dpl
 
-       !
-       !
-       do iCell=1,nCells
-   
-          vt(iCell) = t(iCell) * (1.0 + mr(iCell) * inveps) / (1.0 + mr(iCell))
-      
-       end do
-   
-    end subroutine compute_virtual_temperature
+        if (p_out .gt. p_in(1)) then
+            ! Below surface level
+            interp_to_p = field_in(1)
+        else if (p_out .lt. p_in(nlev)) then
+            ! Above highest model level
+            interp_to_p = field_in(nlev)
+        else
+            do k = 1,nlev-1
+                if ( p_out .gt. p_in(k+1) ) then
+                    dpu = p_out - p_in(k)
+                    dpl = p_in(k+1) - p_out
+                    interp_to_p = (field_in(k) * dpl + field_in(k+1) * dpu)/(dpl + dpu)
+                    return
+                end if
+            end do
 
-   !==================================================================================================
-    subroutine interp_tofixed_pressure(ncol,nlev_in,nlev_out,pres_in,field_in,pres_out,field_out)
-   !==================================================================================================
-   
-   !input arguments:
-    integer,intent(in):: ncol,nlev_in,nlev_out
-   
-    real(kind=RKIND),intent(in),dimension(ncol,nlev_in) :: pres_in,field_in
-    real(kind=RKIND),intent(in),dimension(ncol,nlev_out):: pres_out
-   
-   !output arguments:
-    real(kind=RKIND),intent(out),dimension(ncol,nlev_out):: field_out
-   
-   !local variables:
-    integer:: icol,k,kk
-    integer:: kkstart,kount
-    integer,dimension(ncol):: kupper
-   
-    real(kind=RKIND):: dpl,dpu
-   
-   !--------------------------------------------------------------------------------------------------
-      
-    do icol = 1, ncol
-       kupper(icol) = 1
-    enddo
-   
-    do k = 1, nlev_out 
-   
-       kkstart = nlev_in
-       do icol = 1, ncol
-          kkstart = min0(kkstart,kupper(icol))
-       enddo
-       kount = 0
-   
-       do kk = kkstart, nlev_in-1
-          do icol = 1, ncol
-             if(pres_out(icol,k).gt.pres_in(icol,kk).and.pres_out(icol,k).le.pres_in(icol,kk+1)) then
-                kupper(icol) = kk
-                kount = kount + 1
-   !            write(0,201) kupper(icol),pres_out(icol,k),pres_in(icol,kk),pres_in(icol,kk+1)
-             endif
-          enddo
-   
-          if(kount.eq.ncol) then
-             do icol = 1, ncol
-                dpu = pres_out(icol,k) - pres_in(icol,kupper(icol))
-                dpl = pres_in(icol,kupper(icol)+1) - pres_out(icol,k)
-                field_out(icol,k) = (field_in(icol,kupper(icol))*dpl &
-                                  + field_in(icol,kupper(icol)+1)*dpu)/(dpl + dpu)
-             end do
-             goto 35
-           end if
-       enddo
-   
-       do icol = 1, ncol
-          if(pres_out(icol,k) .lt. pres_in(icol,1)) then
-             field_out(icol,k) = field_in(icol,1)*pres_out(icol,k)/pres_in(icol,1)
-          elseif(pres_out(icol,k) .gt. pres_in(icol,nlev_in)) then
-             field_out(icol,k) = field_in(icol,nlev_in)
-          else
-             dpu = pres_out(icol,k) - pres_in(icol,kupper(icol))
-             dpl = pres_in(icol,kupper(icol)+1) - pres_out(icol,k)
-             field_out(icol,k) = (field_in(icol,kupper(icol))*dpl &
-                               + field_in(icol,kupper(icol)+1)*dpu)/(dpl + dpu)
-          endif
-       enddo
-   
-    35 continue
-   
-    enddo
-   
-    end subroutine interp_tofixed_pressure
+            ! Should not reach here
+        end if
 
-
+    end function interp_to_p
 
     subroutine aviation_diagnostics_reset()
         use mpas_atm_diagnostics_utils, only : MPAS_field_will_be_written
@@ -512,7 +470,9 @@ module aviation_diagnostics
 
     subroutine aviation_diagnostics_cleanup()
         implicit none
-        ! Nothing to cleanup for hiwc
+
+        if (allocated(neighborhood)) deallocate(neighborhood)
+        if (allocated(nNeighbors))   deallocate(nNeighbors)
     end subroutine aviation_diagnostics_cleanup
 
 end module aviation_diagnostics
