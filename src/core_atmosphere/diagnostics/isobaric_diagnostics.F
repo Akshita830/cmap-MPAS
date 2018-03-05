@@ -940,21 +940,20 @@ module isobaric_diagnostics
 
 
     !===============================================================================================
-    subroutine apply_weights(field, interpw, interpi, field_out, p_idx)
+    subroutine apply_weights(field, interpw, interpi, field_out, p_idx, needed)
         use mpas_atm_diagnostics_utils, only : MPAS_field_will_be_written
 
         real (kind=RKIND), dimension(:,:), intent(in) :: field
         real (kind=RKIND), dimension(:,:,:), intent(in) :: interpw
-        integer, dimension(:,:,:), intent(in) :: interpi
+        integer,           dimension(:,:,:), intent(in) :: interpi
         CHARACTER(len=*), intent(in) :: field_out
         integer, intent(in) :: p_idx
+        logical, optional, intent(in) :: needed
 
         real (kind=RKIND), dimension(:), pointer :: field_out_p
-        integer :: iElm, nElements
+        integer :: iElm
 
-        nElements = size(field,2)
-
-        if (MPAS_field_will_be_written(field_out)) then
+        if (.not.present(needed) .or. needed) then
             call mpas_pool_get_array(diag, field_out, field_out_p)
             do iElm=1,nElements
                 field_out_p(iElm) = field(interpi(1,iElm,p_idx),iElm) * interpw(1,iElm,p_idx) + &
@@ -968,8 +967,8 @@ module isobaric_diagnostics
     ! multiple times. Otherwise, use interp_to_p instead
     subroutine calculate_interp_weights(pressure, pOut, nPOut, nCells, nVertLevels, interpw, interpi)
 
-        real (kind=RKIND), dimension(2,nPOut,nCells), intent(out) :: interpw  ! interp weights
-        integer, dimension(2,nPOut,nCells), intent(out) :: interpi            ! interp indices
+        real (kind=RKIND), dimension(2,nCells,nPOut), intent(out) :: interpw  ! interp weights
+        integer,           dimension(2,nCells,nPOut), intent(out) :: interpi  ! interp indices
 
         real (kind=RKIND), dimension(nVertLevels,nCells), intent(in) :: pressure
         real (kind=RKIND), dimension(nPOut), intent(in) :: pOut
@@ -977,36 +976,40 @@ module isobaric_diagnostics
         integer, intent(in) :: nPOut, nCells, nVertLevels
         integer :: iPOut, iCell, iVertLevel, iVertLevel0
         real (kind=RKIND) :: dpu, dpl
+        integer, dimension(nCells) :: iVertLevels0
 
-        loopCell: do iCell=1,nCells
-            loopP: do iPOut=1,nPOut
-                iVertLevel0 = 1
+        iVertLevels0(:) = 1
+
+        loopP: do iPOut=1,nPOut
+            loopCell: do iCell=1,nCells
+                iVertLevel0 = iVertLevels0(iCell)
 
                 if (pOut(iPOut) > pressure(iVertLevel0,iCell)) then
                     ! Below lowest level
-                    interpw(:,iPOut,iCell) = (/1.0_RKIND, 0.0_RKIND/)
-                    interpi(:,iPOut,iCell) = (/iVertLevel0, iVertLevel0/)
+                    interpw(:,iCell,iPOut) = (/1.0_RKIND, 0.0_RKIND/)
+                    interpi(:,iCell,iPOut) = (/iVertLevel0, iVertLevel0/)
                 else if (pOut(iPOut) <= pressure(nVertLevels,iCell)) then
                     ! Above top level
                     iVertLevel0 = nVertLevels
-                    interpw(:,iPOut,iCell) = (/(pOut(iPOut)/pressure(nVertLevels,iCell)), 0.0_RKIND/)
-                    interpi(:,iPOut,iCell) = (/iVertLevel0, iVertLevel0/)
+                    interpw(:,iCell,iPOut) = (/(pOut(iPOut)/pressure(nVertLevels,iCell)), 0.0_RKIND/)
+                    interpi(:,iCell,iPOut) = (/iVertLevel0, iVertLevel0/)
                 else
                     loopVert: do iVertLevel=iVertLevel0,nVertLevels-1
                         iVertLevel0 = iVertLevel
                         if (pOut(iPOut) > pressure(iVertLevel+1,iCell)) then
                             dpu = pOut(iPOut) - pressure(iVertLevel,iCell)
                             dpl = pressure(iVertLevel+1,iCell) - pOut(iPOut)
-                            interpw(:,iPOut,iCell) = (/ (dpl/(dpl+dpu)), (dpu/(dpl+dpu)) /)
-                            interpi(:,iPOut,iCell) = (/ iVertLevel     , iVertLevel+1    /)
+                            interpw(:,iCell,iPOut) = (/ (dpl/(dpl+dpu)), (dpu/(dpl+dpu)) /)
+                            interpi(:,iCell,iPOut) = (/ iVertLevel     , iVertLevel+1    /)
 
                             exit loopVert
                         end if
                     end do loopVert
                 end if
 
-            end do loopP
-        end do loopCell
+                iVertLevels0(iCell) = iVertLevel0
+            end do loopCell
+        end do loopP
     end subroutine calculate_interp_weights
     !===============================================================================================
 
