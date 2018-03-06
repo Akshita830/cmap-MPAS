@@ -350,7 +350,7 @@ module isobaric_diagnostics
         end if
 
         ! Compute dewpoint
-        if ( need_dewpoint .or. need_mslp) then
+        if ( need_dewpoint ) then
             allocate(dewpoint(nVertLevels,nCells))
             ! calculation of temperature at cell centers:
             do iCell = 1,nCells
@@ -690,16 +690,35 @@ module isobaric_diagnostics
     !===============================================================================================
     ! Interpolate pressure to w levels
     subroutine stagger_pressure(pressure, pressure2, height, nVertLevels, nCells)
-        real (kind=RKIND), dimension(:,:), intent(in) :: pressure, height
+
+        real (kind=RKIND), dimension(nVertLevels  ,nCells), intent(in) :: pressure
+        real (kind=RKIND), dimension(nVertLevels+1,nCells), intent(in) :: height
         integer, intent(in) :: nVertLevels, nCells
 
-        real (kind=RKIND), dimension(:,:), intent(out) :: pressure2
+        real (kind=RKIND), dimension(nVertLevels+1,nCells), intent(out) :: pressure2
+
+        real (kind=RKIND), pointer :: cf1, cf2, cf3
 
         real (kind=RKIND) :: z0, z1, z2, w1, w2
         integer :: iCell, k
 
-        k = nVertLevels + 1
-        do iCell = 1, nCells
+        call mpas_pool_get_array(mesh, 'cf1', cf1)
+        call mpas_pool_get_array(mesh, 'cf2', cf2)
+        call mpas_pool_get_array(mesh, 'cf3', cf3)
+
+        do iCell=1, nCells
+            ! Surface
+            pressure2(1,iCell) = cf1*pressure(1,iCell) + cf2*pressure(2,iCell) + cf3*pressure(3,iCell)
+
+            ! Middle layers
+            do k = 2, nVertLevels
+                w1 = (height(k,iCell)-height(k-1,iCell)) / (height(k+1,iCell)-height(k-1,iCell))
+                w2 = (height(k+1,iCell)-height(k,iCell)) / (height(k+1,iCell)-height(k-1,iCell))
+                pressure2(k,iCell) = w1*pressure(k,iCell) + w2*pressure(k-1,iCell)
+            enddo
+
+            ! Model top
+            k = nVertLevels + 1
             z0 = height(k,iCell)
             z1 = 0.5*(height(k,iCell)+height(k-1,iCell))
             z2 = 0.5*(height(k-1,iCell)+height(k-2,iCell))
@@ -707,24 +726,7 @@ module isobaric_diagnostics
             w2 = 1.-w1
             !use log of pressure to avoid occurrences of negative top-of-the-model pressure.
             pressure2(k,iCell) = exp(w1*log(pressure(k-1,iCell))+w2*log(pressure(k-2,iCell)))
-        enddo
-        do k = 2, nVertLevels
-            do iCell = 1, nCells
-                w1 = (height(k,iCell)-height(k-1,iCell)) / (height(k+1,iCell)-height(k-1,iCell))
-                w2 = (height(k+1,iCell)-height(k,iCell)) / (height(k+1,iCell)-height(k-1,iCell))
-                pressure2(k,iCell) = w1*pressure(k,iCell) + w2*pressure(k-1,iCell)
-            enddo
-        enddo
-        k = 1
-        do iCell = 1, nCells
-            z0 = height(k,iCell)
-            z1 = 0.5*(height(k,iCell)+height(k+1,iCell))
-            z2 = 0.5*(height(k+1,iCell)+height(k+2,iCell))
-            w1 = (z0-z2)/(z1-z2)
-            w2 = 1.-w1
-            pressure2(k,iCell) = w1*pressure(k,iCell)+w2*pressure(k+1,iCell)
-        enddo
-
+        end do
     end subroutine
 
     !===============================================================================================
@@ -783,8 +785,8 @@ module isobaric_diagnostics
 
         ! Preparation
         if (need_temp .or. need_dewpoint .or. need_relhum .or. need_uzonal .or. need_umeridional) then
-            allocate(intw(2,nPOut,nCells))
-            allocate(inti(2,nPOut,nCells))
+            allocate(intw(2,nCells,nPOut))
+            allocate(inti(2,nCells,nPOut))
             call calculate_interp_weights(pressure, pOut, nPOut, nCells, nVertLevels, intw, inti)
         end if
 
@@ -865,8 +867,8 @@ module isobaric_diagnostics
 
         ! Preparation
         if (need_height .or. need_w) then
-            allocate(intw(2,nPOut,nCells))
-            allocate(inti(2,nPOut,nCells))
+            allocate(intw(2,nCells,nPOut))
+            allocate(inti(2,nCells,nPOut))
             call calculate_interp_weights(pressure, pOut, nPOut, nCells, nVertLevels, intw, inti)
         end if
 
@@ -914,8 +916,8 @@ module isobaric_diagnostics
 
         ! Preparation
         if (need_vorticity) then
-            allocate(intw(2,nPOut,nVertices))
-            allocate(inti(2,nPOut,nVertices))
+            allocate(intw(2,nVertices,nPOut))
+            allocate(inti(2,nVertices,nPOut))
             call calculate_interp_weights(pressure, pOut, nPOut, nVertices, nVertLevels, intw, inti)
         end if
 
@@ -955,7 +957,7 @@ module isobaric_diagnostics
 
         if (.not.present(needed) .or. needed) then
             call mpas_pool_get_array(diag, field_out, field_out_p)
-            nElements = size(field, 2)
+            nElements = size(interpw, 2)
             do iElm=1,nElements
                 field_out_p(iElm) = field(interpi(1,iElm,p_idx),iElm) * interpw(1,iElm,p_idx) + &
                                     field(interpi(2,iElm,p_idx),iElm) * interpw(2,iElm,p_idx)
