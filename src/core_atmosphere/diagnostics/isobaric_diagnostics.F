@@ -647,7 +647,7 @@ module isobaric_diagnostics
                 wtop_p = (press_in(k) - p_top)/(press_in(k) - press_in(k+1))
                 wtop_m = (p_top - press_in(k+1))/(press_in(k) - press_in(k+1))
             end if
-            if (press_in(k+1) <= p_top .and. press_in(k) > p_bot) then
+            if (press_in(k+1) <= p_bot .and. press_in(k) > p_bot) then
                 k_bot = k
                 wbot_m = (press_in(k) - p_bot) / (press_in(k) - press_in(k+1))
                 wbot_p = (p_bot - press_in(k+1)) / (press_in(k) - press_in(k+1))
@@ -677,7 +677,7 @@ module isobaric_diagnostics
             ! Last layer: p_top/k_top
             w = press_in(k_top) - p_top
             wtotal = wtotal + w
-            temp = wbot_m * field_in(k_top) + wbot_p * field_in(k_top+1)
+            temp = wtop_m * field_in(k_top) + wtop_p * field_in(k_top+1)
             layerMean = layerMean + w * 0.5 * (field_in(k_top) + temp)
 
             layerMean = layerMean / wtotal
@@ -951,10 +951,11 @@ module isobaric_diagnostics
         logical, optional, intent(in) :: needed
 
         real (kind=RKIND), dimension(:), pointer :: field_out_p
-        integer :: iElm
+        integer :: iElm, nElements
 
         if (.not.present(needed) .or. needed) then
             call mpas_pool_get_array(diag, field_out, field_out_p)
+            nElements = size(field, 2)
             do iElm=1,nElements
                 field_out_p(iElm) = field(interpi(1,iElm,p_idx),iElm) * interpw(1,iElm,p_idx) + &
                                     field(interpi(2,iElm,p_idx),iElm) * interpw(2,iElm,p_idx)
@@ -997,9 +998,9 @@ module isobaric_diagnostics
                     loopVert: do iVertLevel=iVertLevel0,nVertLevels-1
                         iVertLevel0 = iVertLevel
                         if (pOut(iPOut) > pressure(iVertLevel+1,iCell)) then
-                            dpu = pOut(iPOut) - pressure(iVertLevel,iCell)
-                            dpl = pressure(iVertLevel+1,iCell) - pOut(iPOut)
-                            interpw(:,iCell,iPOut) = (/ (dpl/(dpl+dpu)), (dpu/(dpl+dpu)) /)
+                            dpu = pOut(iPOut) - pressure(iVertLevel+1,iCell)
+                            dpl = pressure(iVertLevel,iCell) - pOut(iPOut)
+                            interpw(:,iCell,iPOut) = (/ (dpu/(dpl+dpu)), (dpl/(dpl+dpu)) /)
                             interpi(:,iCell,iPOut) = (/ iVertLevel     , iVertLevel+1    /)
 
                             exit loopVert
@@ -1039,9 +1040,9 @@ module isobaric_diagnostics
                 loopVert: do iVertLevel=iVertLevel0,nVertLevels-1
                     iVertLevel0 = iVertLevel
                     if (pOut(iPOut) > pressure(iVertLevel+1)) then
-                        dpu = pOut(iPOut) - pressure(iVertLevel)
-                        dpl = pressure(iVertLevel+1) - pOut(iPOut)
-                        interp_to_p(iPOut) = (field(iVertLevel) * dpl + field(iVertLevel+1) * dpu)/(dpl+dpu)
+                        dpu = pOut(iPOut) - pressure(iVertLevel+1)
+                        dpl = pressure(iVertLevel) - pOut(iPOut)
+                        interp_to_p(iPOut) = (field(iVertLevel) * dpu + field(iVertLevel+1) * dpl)/(dpl+dpu)
                         exit loopVert
                     end if
                 end do loopVert
