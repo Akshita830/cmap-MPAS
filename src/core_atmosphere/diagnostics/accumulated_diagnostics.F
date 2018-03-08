@@ -438,8 +438,20 @@ module accumulated_diagnostics
         implicit none
 
         real (kind=RKIND), dimension(:), pointer :: bucket
+        integer :: iHistp1
 
-        ! Reset 15-minute buckets
+        ! Rest 15-min
+        if (MPAS_is_alarm_ringing(simulationClock, 'acc15mAlarm')) then
+            iHistp1 = mod((iHistory + 1),nHistory)
+            sw15m(:,iHistp1)   = 0.0
+            dni15m(:,iHistp1)  = 0.0
+            lh15m(:,iHistp1)   = 0.0
+            rain15m(:,iHistp1) = 0.0
+            snow15m(:,iHistp1) = 0.0
+            ice15m(:,iHistp1)  = 0.0
+        end if
+
+        ! Reset hourly
         if (MPAS_is_alarm_ringing(simulationClock, 'acc01hAlarm')) then
             call mpas_pool_get_array(diag, 'wspd10_max01h', bucket)
             bucket(:) = 0._RKIND
