@@ -34,6 +34,10 @@
 <!-- unstagger diagnostics -->
 #include "Registry_unstagger.xml"
 
+<!-- turbulence diagnostics -->
+#include "Registry_turbulence.xml"
+
+
 <!-- ******************************* -->
 <!-- End includes from diagnostics -->
 <!-- ******************************* -->

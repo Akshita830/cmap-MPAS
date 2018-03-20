@@ -920,6 +920,15 @@
 			<var name="smois"/>
 			<var name="tslb"/>
 		</stream>
+        
+        
+        <stream name="turbulence"
+            type="output"
+            filename_template="turbulence.$Y-$M-$D_$h.$m.$s.nc"
+            output_interval="3:00:00"
+            runtime_format="separate_file">
+            
+        </stream>
 
 		<stream name="diagnostics" 
                         type="output" 

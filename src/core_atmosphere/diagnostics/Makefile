@@ -13,6 +13,7 @@ DIAGNOSTIC_MODULES = \
     accumulated_diagnostics.o \
 	deformation_diagnostics.o \
 	aviation_diagnostics.o \
+    turbulence_diagnostics.o \
     unstagger_diagnostics.o \
 	soundings.o \
 
@@ -31,6 +32,8 @@ accumulated_diagnostics.o: mpas_atm_diagnostics_utils.o
 deformation_diagnostics.o: mpas_atm_diagnostics_utils.o
 
 aviation_diagnostics.o: mpas_atm_diagnostics_utils.o
+
+turbulence_diagnostics.o: mpas_atm_diagnostics_utils.o
 
 unstagger_diagnostics.o: mpas_atm_diagnostics_utils.o
 

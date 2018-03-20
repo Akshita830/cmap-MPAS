@@ -1,0 +1,24 @@
+<!-- *************************************************************** -->
+<!-- Turbulence diagnostics                                          -->
+<!--                                                                 -->
+<!-- Experimental global turbulence v3 diagnostics                   -->
+<!--                                                                 -->
+<!-- Created by John Wong, March / 2018                              -->
+<!-- Copyright (c) 2018 The Weather Company. All rights reserved.    -->
+<!-- *************************************************************** -->
+
+<dims>
+<!--<dim name="nFlightLevels" definition="11" description="Number of  flight levels for turbulence outputs"/>-->
+</dims>
+
+
+<var_struct name="turb" time_levs="1">
+    
+    
+    <var name="shearsq" type="real" dimensions="nVertLevels nCells Time" units=""
+        description="Vertical shear squared at cell centers"/>
+    
+    <var name="richno" type="real" dimensions="nVertLevels nCells Time" units=""
+          description="Richardson number using theta"/>
+    
+</var_struct>
